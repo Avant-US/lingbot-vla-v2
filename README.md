@@ -37,8 +37,8 @@ Requirements:
 Before running the setup script, make sure Conda is initialized in your shell and `conda activate` works.
 
 ```bash
-git clone https://github.com/Robbyant/lingbot-vla.git
-cd lingbot-vla
+git clone https://github.com/Robbyant/lingbot-vla-v2.git
+cd lingbot-vla-v2
 
 bash tools/create_train_env.sh
 ```
