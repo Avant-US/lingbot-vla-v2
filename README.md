@@ -24,7 +24,7 @@ Compared with LingBot-VLA 1.0, LingBot-VLA 2.0 improves three core capabilities:
 
 ## News
 
-- **[2026-07-08]** LingBot-VLA 2.0 technical report draft and README assets are prepared.
+- **[2026-07-08]** LingBot-VLA 2.0 technical report and pre-trained weights are prepared.
 
 ## Installation
 
@@ -232,7 +232,6 @@ If you find our work useful in your research, please cite:
       author={Wei Wu and Fangjing Wang and Fan Lu and He Sun and Shi Liu and Yunnan Wang and Yibin Yan and Yong Wang and Shuailei Ma and Xinyang Wang and Yibin Liu and Shuai Yang and Tianxiang Zhou and Kejia Zhang and Lei Zhou and Cheng Su and Nan Xue and Bin Tan and Han Zhang and Youchao Zhang and Fei Liao and Xing Zhu and Yujun Shen and Kecheng Zheng},
       journal={arXiv preprint arXiv:2607.06403},
       year={2026}
-}
 }
 ```
 
