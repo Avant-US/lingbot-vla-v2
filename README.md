@@ -1,7 +1,7 @@
 <h1 align="center">LingBot-VLA 2.0: From Foundation to Application</h1>
 
 <p align="center">
-  <a href="assets/LingBot_VLA_2_0.pdf"><img src="https://img.shields.io/static/v1?label=Paper&message=PDF&color=red&logo=arxiv"></a>
+  <a href="https://arxiv.org/pdf/2607.06403"><img src="https://img.shields.io/static/v1?label=Paper&message=PDF&color=red&logo=arxiv"></a>
   <a href="https://technology.robbyant.com/lingbot-vla-v2"><img src="https://img.shields.io/badge/Project-Website-blue"></a>
   <a href="https://huggingface.co/collections/robbyant/lingbot-vla-v2"><img src="https://img.shields.io/static/v1?label=%F0%9F%A4%97%20Model&message=HuggingFace&color=yellow"></a>
   <a href="https://modelscope.cn/collections/Robbyant/LingBot-VLA-V2"><img src="https://img.shields.io/static/v1?label=%F0%9F%A4%96%20Model&message=ModelScope&color=purple"></a>
@@ -227,10 +227,12 @@ LingBot-VLA 2.0 is evaluated in a generalist setting on GM-100 bimanual manipula
 If you find our work useful in your research, please cite:
 
 ```bibtex
-@misc{LingBotVLA2.0,
-  title={From Foundation to Application: Improving VLA Models in Practice},
-  author={Wei Wu and Fangjing Wang and Fan Lu and He Sun and Shi Liu and Yunnan Wang and Yibin Yan and Yong Wang and Shuailei Ma and Xinyang Wang and Yibin Liu and Shuai Yang and Tianxiang Zhou and Kejia Zhang and Lei Zhou and Cheng Su and Nan Xue and Bin Tan and Han Zhang and Youchao Zhang and Fei Liao and Xing Zhu and Yujun Shen and Kecheng Zheng},
-  year={2026}
+@article{lingbotvla2,
+      title={From Foundation to Application: Improving VLA Models in Practice}, 
+      author={Wei Wu and Fangjing Wang and Fan Lu and He Sun and Shi Liu and Yunnan Wang and Yibin Yan and Yong Wang and Shuailei Ma and Xinyang Wang and Yibin Liu and Shuai Yang and Tianxiang Zhou and Kejia Zhang and Lei Zhou and Cheng Su and Nan Xue and Bin Tan and Han Zhang and Youchao Zhang and Fei Liao and Xing Zhu and Yujun Shen and Kecheng Zheng},
+      journal={arXiv preprint arXiv:2607.06403},
+      year={2026}
+}
 }
 ```
 
