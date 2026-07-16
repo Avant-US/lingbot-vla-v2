@@ -1010,6 +1010,372 @@ sequenceDiagram
 
 ---
 
+## 11. 文本、深度与视频：处理、融合与动作作用机制
+
+第 4.4 节给出双查询蒸馏的公式与布局摘要，第 10 章专讲语言条件编码。本章回答一个更具体的工程问题：**文本、深度、视频（外加 RGB 主干）在本仓库里分别怎么进模型、怎么合在一起、又怎样作用于动作生成 \(v_t\)**——包括 forward、backward 与 gradient 可达性。
+
+### 11.1 章首结论：三种「模态」并不对等
+
+直觉上容易把「文本 / 深度图 / 视频」当成三种对称输入。代码里的事实是：
+
+| 模态 | 角色 | 是否进入策略计算图 | 如何作用于动作 |
+|------|------|-------------------|----------------|
+| **文本** | 任务指令条件 | **是**（`lang_tokens` → embed） | Prefix 条件；suffix 必可读 |
+| **RGB 视觉**（Qwen3-VL ViT） | 观测主干 | **是** | Prefix 视觉 token + deepstack；动作主条件 |
+| **深度 / 视频** | **冻结教师目标** + 可学习 query 蒸馏 | 教师 **否**；query / align head **是** | 早期联合注意力塑造表征；未来 query 默认 **注意力隔离**，不直接喂动作头 |
+
+融合判定（后文展开）：
+
+- **是**：早期联合注意力（query 与 RGB/语言同处 prefix）+ 辅助蒸馏目标；
+- **不是**：late fusion（没有把深度图 / 视频特征 concat 进 `action_out_proj`）。
+
+```mermaid
+flowchart TB
+  subgraph Teachers["冻结教师 no_grad"]
+    MoGe["MoGe + MoRGBD"]
+    DINO["DinoVideoTeacher"]
+    MoGe --> Dt["D_t / D_t+T detach"]
+    DINO --> Zt["Z_t / Z_t+T detach"]
+  end
+
+  subgraph StudentPrefix["学生 Prefix 在计算图内"]
+    ViT["Qwen3-VL ViT RGB"]
+    Lang["language embeds"]
+    Qc["current query"]
+    Qf["future query"]
+    ViT --> Pref["prefix sequence"]
+    Lang --> Pref
+    Qc --> Pref
+    Qf --> Pref
+  end
+
+  Pref --> Joint["joint attn + attention blocks"]
+  Suf["suffix: state + x_t"] --> Joint
+  Joint --> Vt["action_out_proj → v_t"]
+  Joint --> Align["Align Heads"]
+  Dt --> Align
+  Zt --> Align
+```
+
+---
+
+### 11.2 文本模态（承接第 10 章）
+
+路径（细节见第 10 章）：
+
+\[
+\text{task}
+\rightarrow
+\texttt{prepare\_language}
+\rightarrow
+\text{lang\_tokens}
+\rightarrow
+\texttt{embed\_language\_tokens}
+\rightarrow
+\text{prefix}
+\]
+
+对动作生成：指令只作 **条件编码**，无 language CE、无文本生成。梯度来自 \(\mathcal{L}_{\mathrm{fm}}\)（以及经联合注意力回传的蒸馏损失对 VLM 的塑造）。本章不重复 CoT 论证。
+
+---
+
+### 11.3 RGB 视觉主干（与教师对比）
+
+策略真正「看见」的图像是 **Qwen3-VL ViT** 输出的视觉 token，经 `embed_prefix` 与 `vision_start` / `vision_end` 边界、`image_grid_thw` / MRoPE、以及可选 deepstack 注入进入联合注意力。
+
+| | RGB（学生 ViT） | Depth / Video 教师 |
+|--|-----------------|---------------------|
+| 入口 | `get_image_features` / `embed_image` | `get_depth_target` / `get_video_target` |
+| 是否在策略图内 | **是** | **否**（冻结 + `no_grad`） |
+| 输出角色 | 观察条件，suffix 必看 | 蒸馏目标，不进 `action_out_proj` |
+| 默认可训 | 是（可 `freeze_vision_encoder`） | 永不更新 |
+
+**例子**：相机拍到的 RGB 同时做两件事——(1) 经 ViT 进 prefix 直接条件化动作；(2) 另拷一份进 MoGe/DINO 教师，算出「标准答案」特征，用来监督可学习 query。教师答案本身从不进动作头。
+
+---
+
+### 11.4 深度模态管线
+
+#### 教师侧
+
+```71:88:lingbotvla/models/vla/vision_models/module_utils.py
+def build_depth_model(config):
+    model_type = config['depth']['model_type']
+    if model_type != 'MoRGBD':
+        raise ValueError(...)
+    moge_model = v2.from_pretrained(config['depth']['moge_path'])
+    for p in moge_model.parameters():
+        p.requires_grad = False
+    ...
+    morgbd_model = v2_morgbd.from_pretrained(config['depth']['morgbd_path'])
+    for p in morgbd_model.parameters():
+        p.requires_grad = False
+    ...
+    return moge_model, morgbd_model
+```
+
+`get_depth_target`：取第 1 路相机 RGB → MoGe `infer` 得 depth → MoRGBD `infer_feat` → `[B, 256, C]`（bf16）：
+
+```426:447:lingbotvla/models/vla/vision_models/module_utils.py
+def get_depth_target(model_type, depth_model, pil_images):
+    ...
+    output_moge = moge_model.infer(input_images, resolution_level=3, num_tokens=256, apply_mask=False)
+    ...
+    depth_target, cls_token = morgbd_model.infer_feat(input_images, depth_pred, ...)
+    ...
+    return depth_target.to(dtype=torch.bfloat16), cls_token
+```
+
+#### 学生侧
+
+- `init_depth_heads`：可学习 `depth_align_embs`（及可选 `future_depth_*`）+ `TaskTokenDepthHead`（resampler：用 LLM 上下文把 query 投到教师空间）。
+- `depth_emb_forward`：取第一视角图像 hidden 与 current/future query hidden，经 head 预测，对目标做 Smooth L1（目标再 `.detach()`）。
+
+```1418:1441:lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla.py
+    def depth_emb_forward(self, hidden_states, depth_targets=None, img_masks=None, future_depth_targets=None):
+        ...
+        align_embs = torch.cat([image_embs, align_embs], dim=1)
+        ...
+        current_loss = self._emb_loss(depth_preds, depth_targets)
+        if self.use_future_depth:
+            future_image_embs = (
+                image_embs.detach()
+                if getattr(self, "detach_future_depth_image_feats", False)
+                else image_embs
+            )
+            ...
+            future_loss = self._emb_loss(future_depth_preds, future_depth_targets)
+```
+
+```1604:1606:lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla.py
+    def _emb_loss(self, emb_preds, emb_targets):
+        l1_loss = F.smooth_l1_loss(emb_preds.float(), emb_targets.float().detach(), reduction="none")
+        return l1_loss.mean()
+```
+
+RoboTwin：`block_future_depth_to_action: true`、`detach_future_image_feats: true`、权重 `depth_loss_weight` / `future_depth_loss_weight` = 0.004。
+
+#### 训练调用链
+
+```769:808:tasks/vla/train_lingbotvla.py
+                if use_depth_align:
+                    with torch.no_grad():
+                        ...
+                            depth_targets, cls_token = get_depth_target(...)
+                            if use_future_depth:
+                                future_depth_targets, ... = get_depth_target(..., future_pil_images)
+                        if use_future_video:
+                            ...
+                                future_video_target_bundle = get_video_target(...)
+                ...
+                    model_outputs = model(
+                        **micro_batch,
+                        depth_targets=depth_targets,
+                        future_depth_targets=future_depth_targets,
+                        future_video_targets=future_video_targets,
+                        ...
+                    )
+```
+
+教师前向在 `torch.no_grad()` 外层完成 → **不进计算图**；学生 `forward` 才对 query / VLM / expert 建图。
+
+---
+
+### 11.5 视频模态管线
+
+#### 教师侧
+
+- `build_video_model` → `DinoVideoTeacher`（参数冻结）。
+- `get_video_target`：对当前/未来帧做 ImageNet 归一化；`use_warmup_frame` 时帧序含重复当前帧作 warmup，`current_index=1`；输出 patch（及可选 current_patch）并 `.detach()`。
+
+#### 学生侧
+
+- `video_emb_forward`：对齐 **未来** DINO 特征（MSE / smooth-L1 / cosine 可组合）。
+- `current_video_emb_forward`：对齐 **当前** DINO patch；在共享模式下占用 **current_depth 同位置** 的 hidden。
+
+#### RoboTwin 关键设计：单槽双监督
+
+配置：`share_future_depth_query: true`、`use_shared_future_task_proj: true`、`use_current_shared_task_proj: true`。
+
+`prefix_query_segments` 在共享时 **不单独插入** `future_video` 段：
+
+```116:123:lingbotvla/models/vla/lingbot_vla/utils.py
+    segments.append("current_depth")
+    if use_future_video:
+        if use_future_video_cls:
+            segments.append("future_video_cls")
+        if use_future_video_patch and not future_video_share_future_depth_query:
+            segments.append("future_video")
+    if use_future_depth:
+        segments.append("future_depth")
+```
+
+于是 RoboTwin 实际 query 只有两段（各 `num_task_tokens=8`）：`current_depth` 与 `future_depth`；视频监督通过 `shared_*_task_proj` 把 video 种子混入同一槽，再分别对齐深度与视频目标。
+
+`block_suffix_to_future_video` 在 **不共享** 时挡住独立 future-video 列；共享模式下 own span 长度为 0，**实际隔离未来信息靠 `block_future_depth_to_action`**（挡住 prefix 尾部 `future_depth` 段）。
+
+---
+
+### 11.6 融合机制：prefix 布局与注意力
+
+#### RoboTwin 实际 prefix 顺序
+
+```
+[vision_start | RGB patches | vision_end] × N_cam
+→ language
+→ current_depth (8；可混入 current video 种子)
+→ future_depth (8；可混入 future video 种子)
+→ | suffix: state + noisy action chunk |
+```
+
+#### 谁可见谁
+
+| 注意力边 | RoboTwin 默认 | 效果 |
+|----------|---------------|------|
+| suffix → `current_depth` | **不挡** | 当前几何/动态 query **可早期融合进动作** |
+| suffix → `future_depth`（尾部） | `block_future_depth_to_action=true` | 动作 **看不到未来** |
+| suffix → 独立 `future_video` | `block_suffix_to_future_video=true` | 仅不共享时生效 |
+| prefix ↔ prefix | `vlm_causal: true` → 因果；否则双向 | query 可读 RGB/语言（因果时受位置约束） |
+
+隔离实现（训练与 `predict_velocity` 推理去噪均应用）：`block_suffix_to_fv_` 把 suffix 行对 prefix 尾部 `num_task_tokens` 列置 False。
+
+#### 融合类型判定
+
+1. **Early fusion（joint attention）**：可学习 query 与 RGB/语言同一序列，共享 Transformer 注意力。
+2. **Auxiliary-only（教师）**：深度/视频特征只作对齐目标，不进动作头。
+3. **非 late fusion**：无「深度图/视频特征再 concat 到 action head」。
+4. **未来支路刻意非融合到动作**：注意力硬隔离 + 可选 `detach_*_image_feats` 切断未来支路对图像 token 的梯度。
+
+**例子**：像开卷考试——当前题干（RGB+语言+当前 query）允许边看边答（动作）；标准答案（教师深度/视频）只用来改「笔记」（query/VLM 表征）；未来卷子的答案纸盖住，不许偷看再答题。
+
+---
+
+### 11.7 Forward / Backward / Gradient 流
+
+总损失（与第 6 章一致）：
+
+\[
+$$\mathcal{L}
+=
+\mathcal{L}_{\mathrm{fm}}
++\lambda_d\mathcal{L}_{\mathrm{depth}}
++\lambda_{fd}\mathcal{L}_{\mathrm{future\_depth}}
++\lambda_v\mathcal{L}_{\mathrm{video}}
++\mathcal{L}_{\mathrm{seq}}
++\mathcal{L}_{z}$$
+\]
+
+#### Forward（训练）
+
+```mermaid
+flowchart TB
+  subgraph Teachers["Teachers no_grad"]
+    RGB_t["pil_images / future_pil_images"]
+    RGB_t --> MoGe["MoGe+MoRGBD"]
+    RGB_t --> DINO["DinoVideoTeacher"]
+    MoGe --> Dt["depth targets detach"]
+    DINO --> Zt["video targets detach"]
+  end
+
+  subgraph Pref["embed_prefix"]
+    ViT["ViT RGB tokens"]
+    Lang["lang embeds"]
+    Qc["current query"]
+    Qf["future query shared"]
+  end
+
+  Pref --> Mask["make_att_2d_masks + block future"]
+  Suf["embed_suffix state + x_t"] --> Mask
+  Mask --> H["QwenvlWithExpertV2 hidden"]
+  H --> FM["L_fm via action_out_proj"]
+  H --> DH["depth_emb_forward"]
+  H --> VH["video_emb_forward / current_video"]
+  Dt --> DH
+  Zt --> VH
+```
+
+#### Backward 可达性
+
+```mermaid
+flowchart LR
+  LFM["L_fm"] --> AE["Action Expert + action_proj"]
+  LFM --> VLM["VLM / ViT"]
+  LFM --> Qc["current query embs"]
+  LFM -.->|blocked attn| Qf["future query embs"]
+
+  Ld["L_depth / L_video"] --> Heads["Align Heads + shared_proj"]
+  Ld --> Qc
+  Ld --> Qf
+  Ld --> VLM
+  Ld -.->|prefix cannot see suffix| AE
+
+  Tch["Teachers"] -.->|no grad| Empty["no updates"]
+```
+
+| 损失 | 更新谁 | 能否更新 action expert | 能否更新 align heads |
+|------|--------|------------------------|----------------------|
+| \(\mathcal{L}_{\mathrm{fm}}\) | expert、`action_*_proj`、VLM（suffix attend prefix）、**current** query | **是** | **否**（不经 align head） |
+| \(\mathcal{L}_{depth/video}\) | query embs、`TaskTokenDepthHead` / video heads、`shared_*_proj`、VLM | **基本否**（prefix 输出不依赖 suffix） | **是** |
+| 未来 query + FM | 注意力被 block → FM **几乎不**更新 future query | — | future head 仅靠蒸馏 |
+| 教师 | 无 | — | — |
+
+**间接耦合（设计意图）**：蒸馏塑造 VLM / current-query 表征 → FM 用这些 K/V 预测 \(v_t\) → 动作变好。未来 query 主要服务「预测动力学」代理任务与感知可视化，默认不直接泄漏给动作。
+
+---
+
+### 11.8 推理路径：有 query、无教师
+
+`sample_actions`：
+
+1. 仍调用 `embed_prefix` → **若开了 `align_params`，可学习 query 仍在 prefix**；
+2. **不**调用 `get_*_target`，**不**跑 `depth_emb_forward` / `video_emb_forward`；
+3. Prefix 填 KV cache → Euler 去噪；`predict_velocity` 仍对未来列做 block。
+
+因此：深度/视频 **特征本身** 不影响在线推理；影响动作的是训练后固定下来的 **query 嵌入 + VLM 表征**（尤其是 suffix 可见的 current query 与 RGB/语言交互）。这与论文「感知结果非动作生成硬依赖」一致。
+
+```mermaid
+sequenceDiagram
+  participant P as sample_actions
+  participant E as embed_prefix
+  participant K as KV_cache
+  participant V as predict_velocity
+  P->>E: images + lang + learnable queries
+  Note over E: no teachers no align loss
+  E->>K: fill_kv_cache
+  loop Euler steps
+    P->>V: suffix only + block future cols
+    V-->>P: v_t
+  end
+```
+
+---
+
+### 11.9 关键代码调用链索引
+
+| 阶段 | 符号 / 配置 | 文件 |
+|------|-------------|------|
+| 配置 | `align_params`（`mode/query`、weights、`block_*`、`share_*`） | `configs/vla/robotwin/robotwin.yaml` |
+| 构建教师 | `build_depth_model` / `build_video_model` | `vision_models/module_utils.py` |
+| 每 step 目标 | `get_depth_target` / `get_video_target`（`no_grad`） | `tasks/vla/train_lingbotvla.py` |
+| Prefix 布局 | `prefix_query_segments` / `embed_prefix` | `utils.py` / `modeling_lingbot_vla_v2.py` |
+| 隔离 | `block_suffix_to_fv_` / `block_future_depth_to_action` | `utils.py` / `modeling_lingbot_vla_v2.py` |
+| 蒸馏损失 | `depth_emb_forward` / `video_emb_forward` / `current_video_emb_forward` | `modeling_lingbot_vla.py` |
+| 总损失 | `LingbotVlaV2Policy.forward` → `total_loss` | `modeling_lingbot_vla_v2.py` |
+| 推理 | `sample_actions` / `predict_velocity` | `modeling_lingbot_vla_v2.py` |
+
+---
+
+### 11.10 与第 4.4 / 6 / 10 章的关系
+
+| 章节 | 侧重 |
+|------|------|
+| **4.4** | 双查询蒸馏公式、LARYBench、配置要点 |
+| **6** | 训练/推理总序列、冻结表、总损失求和 |
+| **10** | 文本路径、为何不是 CoT、`lm_head` |
+| **11（本章）** | 三模态角色差异、融合判定、当前/未来不对称、梯度可达性矩阵、推理时「有 query 无教师」 |
+
+---
+
 ## 附录 A：关键符号
 
 | 符号 | 含义 |
@@ -1021,10 +1387,200 @@ sequenceDiagram
 
 ## 附录 B：阅读代码的推荐顺序
 
-1. `configs/vla/robotwin/robotwin.yaml` — 先建立超参地图  
+1. `configs/vla/robotwin/robotwin.yaml` — 先建立超参地图（含 `align_params`）  
 2. `FeatureTransform.apply` — 数据如何变成 55 维  
 3. `prepare_language`（`transform.py`）— 指令如何变成 `lang_tokens`（见第 10 章）  
-4. `FlowMatchingV2.forward` — 一次训练 step  
-5. `Qwen2TokenMoeBlock.forward` — MoE  
-6. `depth_emb_forward` / `video_emb_forward` — 蒸馏  
-7. `sample_actions` + `deploy/lingbot_vla_v2_policy.py` — 推理闭环  
+4. `get_depth_target` / `get_video_target` + `train_lingbotvla` 中 `no_grad` 段 — 教师目标（见第 11 章）  
+5. `FlowMatchingV2.embed_prefix` + `prefix_query_segments` — 多模态 prefix 布局  
+6. `FlowMatchingV2.forward` — 一次训练 step  
+7. `depth_emb_forward` / `video_emb_forward` — 蒸馏损失  
+8. `Qwen2TokenMoeBlock.forward` — MoE  
+9. `sample_actions` + `deploy/lingbot_vla_v2_policy.py` — 推理闭环  
+
+
+# 附一: VLM与ActionExpert如何一起训练
+
+## 问
+**问:** 如果我的理解是: 接受图像和文本为输入的VLM其实是和action expert纠缠在一起同时训练的.  这个理解是否正确? 请详细解析
+**是的，这个理解大体正确**——但要补上三个精确限定：「纠缠」是**联合注意力纠缠**，不是权重共用；「同时训练」是**默认如此**，可配置冻结；信息流是**单向为主**（动作看 VLM，VLM 默认看不到动作）。
+
+---
+
+## 1. 一句话校正
+
+接受图像和文本的 VLM，与 action expert **不是两个独立串行模块**（先 VLM 编码完再丢给专家），而是：
+
+- **两套参数**（双塔）；
+- **每一层把两边的 Q/K/V 拼在一起做一次注意力**（联合注意力）；
+- **默认在同一次 `backward` 里一起更新**。
+
+所以说「纠缠在一起同时训练」是对的；若理解成「整网权重共享」或「VLM 也会读动作 token 再写回去」则不准确。
+
+---
+
+## 2. 静态结构：双塔 + 同层数
+
+```mermaid
+flowchart LR
+  subgraph VLM["Qwen3-VL 塔"]
+    ViT["visual"]
+    LLM["language_model 36层"]
+  end
+  subgraph Expert["Action Expert 塔"]
+    AE["Qwen2 36层 + MoE FFN"]
+  end
+  Pref["prefix: 图像+文本+query"] --> VLM
+  Suf["suffix: state + x_t"] --> Expert
+  VLM <-->|"每层 concat QKV → joint attn → 切回"| Expert
+  Expert --> Vt["action_out_proj → v_t"]
+```
+
+代码强制两边层数相等：
+
+```329:332:lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
+        assert action_num_layers == num_layers, (
+            "Action expert and VLM must have the same number of layers "
+            f"(got action={action_num_layers}, vlm={num_layers})."
+        )
+```
+
+每层流程（纠缠发生处）：
+
+```334:403:lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
+        for layer_idx in range(num_layers):
+            ...
+            for i, hidden_states in enumerate(inputs_embeds):
+                ...
+                q, k, v = models[i].layers[layer_idx](...)  # i=0 VLM, i=1 expert
+            query_states = torch.cat(query_states, dim=1)
+            key_states = torch.cat(key_states, dim=1)
+            value_states = torch.cat(value_states, dim=1)
+            ...
+            att_output = ...  # 一次联合注意力
+            # 再按 token 区间切回各自塔，各自做 FFN/MoE
+```
+
+要点：
+
+| 共享什么 | 不共享什么 |
+|----------|------------|
+| 注意力里的跨塔信息交换（K/V 可见性由 mask 定） | 各自的 QKV 投影、FFN（专家侧常为 MoE） |
+| 同一次 forward / 同一次 loss | `lm_head`（默认删掉） |
+
+---
+
+## 3. 「纠缠」的信息方向：prefix-LM 式，不是全双向
+
+Suffix 的 `att_masks` 刻意做成：**prefix 不能 attend suffix**，suffix 能看 prefix；state 与 action 之间也有边界：
+
+```1161:1167:lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla.py
+        # Set attention masks for suffix tokens so that prefix tokens cannot attend to suffix tokens.
+        # And state token cannot attend action tokens.
+        # Action tokens use a bidirectional attention.
+        att_masks = torch.zeros(...)
+        att_masks[:, :2] = True
+```
+
+因此更准确的说法是：
+
+\[
+$$\text{Action Expert} \;\text{读}\; \text{VLM(prefix)} \quad\text{（训练时强耦合）}$$
+\]
+
+\[
+$$\text{VLM(prefix)} \;\not\!\leftarrow\; \text{动作 token} \quad\text{（注意力上隔开）}$$
+\]
+
+所以：
+
+- **动作生成依赖 VLM**：正确（suffix 看图像/文本/当前 query）。
+- **VLM 表征在注意力上不依赖当前噪声动作**：正确（prefix 看不到 suffix）。
+- **但 VLM 仍会因动作损失更新**：因为 \(\mathcal{L}_{\mathrm{fm}}\) 经「suffix → prefix 的注意力」回传到 VLM 的 K/V 与更底层权重（见下一节）。
+
+额外：`block_future_depth_to_action` 还会挡住 suffix→未来 query，那是蒸馏设计，不改变「VLM↔专家联合注意力」这一总结构。
+
+---
+
+## 4. 「同时训练」：默认是，可关掉
+
+默认 RoboTwin：`freeze_vision_encoder: false`，未开 `train_expert_only` → **ViT + VLM LLM + Action Expert 都参与优化**。
+
+开关在：
+
+```197:205:lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
+    def set_requires_grad(self):
+        if self.config.freeze_vision_encoder:
+            ...  # 只冻 ViT
+        if self.config.train_expert_only:
+            self.qwenvl.eval()
+            for params in self.qwenvl.parameters():
+                params.requires_grad = False  # 整塔 VLM 冻结，只训专家
+```
+
+| 模式 | VLM | Action Expert | 是否「同时训练」 |
+|------|-----|---------------|------------------|
+| 默认后训练 | 可训 | 可训 | **是** |
+| `freeze_vision_encoder` | LLM 可训，ViT 冻 | 可训 | 部分同时 |
+| `train_expert_only` | 全冻 | 可训 | **否**（专家单独适配） |
+
+损失侧也没有单独的「先训 VLM、再训专家」两阶段调度；一次 `forward` 算出 \(\mathcal{L}_{\mathrm{fm}}+\mathcal{L}_{\mathrm{align}}+\mathcal{L}_{\mathrm{moe}}\)，一次 `backward`。
+
+---
+
+## 5. Forward / Backward 里「纠缠」具体怎么走
+
+### Forward
+
+1. **VLM 塔**吃 prefix：RGB tokens + `lang_tokens` +（可选）蒸馏 query。  
+2. **Expert 塔**吃 suffix：`state` + 噪声动作 \(x_t\) + 时间。  
+3. 每层：两边各自算 QKV → **concat** → 联合注意力 → **切回** → 各自 FFN/MoE。  
+4. 只用 expert 侧最后若干 action token → `action_out_proj` → \(v_t\)。  
+5. 蒸馏损失从 **VLM 侧 hidden** 抽 query span，对齐冻结教师（教师不在图内）。
+
+### Backward / 梯度
+
+```mermaid
+flowchart TB
+  Lfm["L_fm"] --> Out["action_out_proj"]
+  Out --> SufH["Expert suffix hidden"]
+  SufH --> Att["joint attention"]
+  Att -->|"suffix 读了 prefix 的 K/V"| PrefH["VLM prefix hidden"]
+  PrefH --> ViT["ViT / LLM / current query"]
+  Att --> ExpW["Expert QKV + MoE"]
+
+  Lalign["L_depth / L_video"] --> Heads["Align heads"]
+  Heads --> PrefH2["VLM query / image feats"]
+  PrefH2 -.->|"prefix 看不到 suffix"| ExpBlocked["Expert 基本收不到 align 直连梯度"]
+```
+
+| 损失 | 会更新 VLM？ | 会更新 Expert？ |
+|------|--------------|-----------------|
+| \(\mathcal{L}_{\mathrm{fm}}\) | **会**（经联合注意力） | **会** |
+| \(\mathcal{L}_{\mathrm{depth/video}}\) | **会**（query + 图像上下文） | **基本不会直连**（prefix 不看 suffix） |
+| 教师 | 否 | 否 |
+
+因此「同时训练」更准确的表述是：
+
+> **同一优化步里，动作主损失把两塔绑在一起更新；蒸馏损失主要额外塑造 VLM（及 current query），再通过后续 step 的联合注意力间接帮动作。**
+
+---
+
+## 6. 和常见误解对照
+
+| 说法 | 对错 | 说明 |
+|------|------|------|
+| VLM 和 action expert 纠缠并同时训练 | **对（默认）** | 联合注意力 + 共 loss |
+| 两塔权重完全共享 | **错** | 参数分离，只共享注意力交互 |
+| VLM 先算完特征再冻结，专家单独训 | **非默认** | 需 `train_expert_only` |
+| 图像/文本先进 VLM，动作头完全独立、无跨塔注意力 | **错** | 每层都 joint attn |
+| 蒸馏深度/视频也是和专家「同等方式」纠缠 | **不对称** | 教师冻结；未来 query 还常被 mask 挡掉 |
+
+---
+
+## 7. 小结
+
+你的理解可以收成这句更严谨的话：
+
+> **LingBot-VLA 2.0 用双塔结构：吃图像+文本的 VLM 与吃状态+噪声动作的 action expert，在每一层通过联合注意力耦合；默认在同一次训练步中由 \(\mathcal{L}_{\mathrm{fm}}\)（及辅助蒸馏）共同更新。纠缠主要是「动作侧读取并反传至 VLM 条件表征」，而不是两塔权重合一，也不是 VLM 在注意力上读取动作 token。**
+
+若你关心的是「后训练时是否应该冻 VLM」：本仓库 RoboTwin 配置是**不冻、两端一起训**；只有显式开 `train_expert_only` / `freeze_vision_encoder` 才会削弱这种同时纠缠。
