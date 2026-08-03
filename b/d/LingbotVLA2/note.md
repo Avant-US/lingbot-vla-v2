@@ -325,11 +325,11 @@ Bias **不走梯度**，由 optimizer pre-hook 更新：[`moe_load_balance.py`](
 可学习 query \([Q_t, Q_{t+T}]\)，\(T=\) action chunk：
 
 \[
-\mathcal{L}_{depth}=\mathbb{E}\big[\|Proj_d(Q_t)-D_t\|_1+\|Proj_d(Q_{t+T})-D_{t+T}\|_1\big]
+$$\mathcal{L}_{depth}=\mathbb{E}\big[\|Proj_d(Q_t)-D_t\|_1+\|Proj_d(Q_{t+T})-D_{t+T}\|_1\big]$$
 \]
 
 \[
-\mathcal{L}_{video}=\mathbb{E}\big[\|Proj_v(Q_t)-Z_t\|_F^2+\|Proj_v(Q_{t+T})-Z_{t+T}\|_F^2\big]
+$$\mathcal{L}_{video}=\mathbb{E}\big[\|Proj_v(Q_t)-Z_t\|_F^2+\|Proj_v(Q_{t+T})-Z_{t+T}\|_F^2\big]$$
 \]
 
 DINO-Video：DINOv3 + causal temporal attention + 3D-RoPE；LARYBench 上 robot 侧优于 V-JEPA 2 / DINOv3。
@@ -1584,3 +1584,241 @@ flowchart TB
 > **LingBot-VLA 2.0 用双塔结构：吃图像+文本的 VLM 与吃状态+噪声动作的 action expert，在每一层通过联合注意力耦合；默认在同一次训练步中由 \(\mathcal{L}_{\mathrm{fm}}\)（及辅助蒸馏）共同更新。纠缠主要是「动作侧读取并反传至 VLM 条件表征」，而不是两塔权重合一，也不是 VLM 在注意力上读取动作 token。**
 
 若你关心的是「后训练时是否应该冻 VLM」：本仓库 RoboTwin 配置是**不冻、两端一起训**；只有显式开 `train_expert_only` / `freeze_vision_encoder` 才会削弱这种同时纠缠。
+
+# 附二: 相对深度vs绝对深度
+
+**短答：VLA 2.0 论文正文并没有写「用相对深度还是绝对深度」；从它引用的教师 LingBot-Depth 看，几何监督侧强调的是 metric（米制/绝对尺度）深度，而不是 monocular 里常见的相对深度。消融里的 relative/absolute 说的是关节动作，不是深度。**
+
+---
+
+## 1. VLA 论文本身：看不出相对/绝对
+
+深度相关表述主要在 Method 的 dual-query 小节（[`3_method.tex`](b/d/LingbotVLA2/TeX_Source/sections/3_method.tex)）：
+
+- 用 LingBot-Depth 提供 **geometric supervision / geometric cues**
+- 蒸馏目标是深度表征 \(\mathbf{D}_t, \mathbf{D}_{t+T}\)
+- 损失是 \(\|\mathrm{Proj}_{depth}(Q)-\mathbf{D}\|_1\)
+
+全文**没有**出现对深度的 *relative depth / absolute depth / metric depth / affine-invariant* 之类措辞。  
+因此：**单靠 VLA 论文正文，无法直接读出相对还是绝对。**
+
+引用只有：
+
+```136:139:b/d/LingbotVLA2/TeX_Source/main.bbl
+\bibitem{lingbotdepth}
+... Masked depth modeling for spatial perception.
+\newblock \url{https://technology.robbyant.com/lingbot-depth}, 2026.
+```
+
+要判断尺度，必须跟到这篇教师工作，而不是 VLA 正文。
+
+---
+
+## 2. 别和消融里的 relative/absolute 搞混
+
+[`4_experiments.tex`](b/d/LingbotVLA2/TeX_Source/sections/4_experiments.tex) 里大量 *relative / absolute* 指的是：
+
+- **`relQpos` vs `absQpos`（相对/绝对关节动作）**
+
+与深度模态无关。看到 “relative … absolute …” 不要当成深度类型。
+
+---
+
+## 3. 从教师论文/文档能推出什么
+
+被引用的 **LingBot-Depth**（Masked Depth Modeling）明确强调：
+
+- **metric-scale / metric-accurate** 深度（米制、可保留真实世界尺度）
+- 典型设定是 RGB-D：**有传感器绝对深度**，做 completion/refinement；极端全 mask 时也可当 monocular metric 估计
+
+仓库内教师 README 同样写：
+
+> high-quality, **metric-accurate** 3D measurements … **Metric-Scale Preservation**
+
+所以：若问「教师几何先验是相对深度还是绝对深度」——按 LingBot-Depth 的自我定位，是 **绝对/米制（metric）一侧**，不是 DepthAnything 那类纯相对深度。
+
+---
+
+## 4. 和本仓库实现的关系（补充精度）
+
+VLA 训练里实际是：
+
+1. **MoGe** 从 RGB 估一张 `depth`  
+2. 再送进 **MoRGBD（LingBot-Depth）** `infer_feat`，得到 token 特征 \(\mathbf{D}\)  
+3. 学生对齐的是这些 **特征 token**，不是把深度图当作策略输入
+
+因此更精确的说法是：
+
+- 论文层面：蒸馏 **几何表征**，未声明相对/绝对；
+- 教师谱系：LingBot-Depth → **metric**；
+- 实现层面：对齐的是 teacher latent，不是策略直接回归「米」；尺度属性继承自 MoGe→MoRGBD 这条链，而不是 VLA 正文写明。
+
+---
+
+## 5. 结论表
+
+| 问题 | 答案 |
+|------|------|
+| VLA 论文哪里写了相对/绝对深度？ | **没写**；只写 LingBot-Depth + \(\mathbf{D}_t\) 蒸馏 |
+| 论文里 relative/absolute 是什么？ | **动作** `relQpos`/`absQpos`，不是深度 |
+| 若必须归类深度尺度？ | 跟引用教师 → **metric（绝对尺度）几何**；不是「相对深度蒸馏」的表述 |
+| 证据链 | VLA Method 引用 `lingbotdepth` → LingBot-Depth 报告/主页的 metric-scale 表述 |
+
+若要在论文里「钉死」一句话，应去读引用的 [LingBot-Depth / MDM](https://technology.robbyant.com/lingbot-depth)（arXiv:2601.17895），而不是 VLA 2.0 正文。
+
+
+
+---
+
+## LingBot-Depth用绝对深度
+
+**结论：LingBot-Depth 输出的是绝对深度（metric / 米制），不是相对深度。**
+
+### 1. 项目页 [technology.robbyant.com/lingbot-depth](https://technology.robbyant.com/lingbot-depth)
+
+明确写：
+
+- *high-quality, **metric-accurate** 3D measurements*
+- ***metric-scale** depth estimation*
+- 输出 *accurate **metric depth maps***（显式几何）+ 对齐特征（隐式）
+- 下游 4D tracking 也是 *captured in **metric scale***
+
+### 2. GitHub README ([robbyant/lingbot-depth](https://github.com/robbyant/lingbot-depth))
+
+- 能力点：***Metric-Scale Preservation*** — 保留真实世界尺度  
+- 输入深度：单位 **Meters**  
+- 输出：
+
+```text
+depth:  refined depth [B, H, W]   # 米
+points: point cloud [B, H, W, 3]  # 相机坐标系 3D 点
+```
+
+- 示例产物：`depth_refined.npy` 标注为 **float32, meters**  
+- `example.py` 打印：`Refined depth range: ... meters`
+
+---
+
+## 和「相对深度」的区别
+
+| | 相对深度（如部分 monocular MDE） | LingBot-Depth |
+|--|----------------------------------|---------------|
+| 含义 | 只保留远近顺序/相对关系，尺度可任意缩放 | 数值对应真实距离（米） |
+| 典型用途 | 语义、相对几何 | 机器人抓取、度量重建、metric tracking |
+| 官方定位 | — | **metric-accurate / metric-scale** |
+
+它的主设定是 **RGB-D 深度补全/精修**：吃传感器绝对深度（可有空洞），吐出补全后的 **米制深度图** 和相机系点云；不是 DepthAnything 那类「只出相对深度」的模型。
+
+---
+
+## 和 VLA 代码的一点对应
+
+VLA 里蒸馏用的是 LingBot-Depth（MoRGBD）的 **特征 token**，不是策略直接吃深度图；但教师本身的设计目标仍是 **metric 几何**。若只问「LingBot-Depth 输出什么」——官方答案是：**绝对（米制）深度 + 相机坐标系点云**。
+
+
+# 附三: video蒸馏
+
+## depth和video是分开蒸馏的
+
+**是的：深度和视频是分开蒸馏的**——两个教师、两套损失、两条对齐前向；但在 RoboTwin 默认配置下，**可学习 query 槽位可以共享**，所以是「损失分开、表征槽可共用」。
+
+---
+
+### 分开的部分
+
+| 项目 | Depth | Video |
+|------|-------|-------|
+| 教师 | LingBot-Depth（MoGe + MoRGBD） | DINO-Video |
+| 目标 | \(\mathbf{D}_t, \mathbf{D}_{t+T}\) | \(\mathbf{Z}_t, \mathbf{Z}_{t+T}\) |
+| 学生前向 | `depth_emb_forward` | `video_emb_forward` / `current_video_emb_forward` |
+| 损失 | Smooth L1（`_emb_loss`） | 主要 MSE（可配 smooth-L1/cosine） |
+| 权重 | `depth_loss_weight` / `future_depth_loss_weight` | `future_video_loss_weight` |
+
+总损失里是**相加**，不是合成一个联合蒸馏目标：
+
+\[
+\mathcal{L} \supset \lambda_d\mathcal{L}_{depth}+\lambda_{fd}\mathcal{L}_{future\_depth}+\lambda_v\mathcal{L}_{video}
+\]
+
+训练时也是分别 `get_depth_target` / `get_video_target`，再各自算 loss。
+
+论文写法也是「两个 complementary teachers」：几何（depth）+ 时序语义（video），目标与公式各自独立。
+
+---
+
+### 不「完全独立」的部分（RoboTwin）
+
+配置里常见：
+
+- `share_future_depth_query: true`
+- `use_shared_future_task_proj: true`
+- `use_current_shared_task_proj: true`
+
+含义：
+
+- **不**再为 video 单独开一段 prefix query；
+- 当前 / 未来各用一套 query 槽，经 `shared_*_task_proj` 把 depth/video 种子混进同一槽；
+- 然后**同一套 hidden** 分别对齐 depth 目标与 video 目标。
+
+所以：
+
+> **蒸馏任务分开（两教师、两损失）；query 可以共享（一个槽、双重监督）。**
+
+若不共享（`share_future_depth_query: false`），还会在 prefix 里单独插 `future_video` 段，那时布局也更分开。
+
+---
+
+**一句话**
+
+**Depth 和 video 是分开蒸馏的**；默认实现里常常**共用 query 位置、分开算损失**，而不是合成一个单一的 depth–video 联合蒸馏头。
+
+
+## 学生模型在训练时不生成视频而是做隐层蒸馏
+
+**学生模型训练时并不「生成视频」。** 它只通过可学习 query 去对齐教师的视频特征；真正看短视频片段的是冻结的 DINO-Video 教师。
+
+---
+
+### 学生在干什么
+
+- 输出：对齐后的 **patch/特征**（以及动作 \(v_t\)），**不是**像素视频、也不是多帧 RGB。
+- 前向：`video_emb_forward` / `current_video_emb_forward` 用 query + 图像 hidden → `Proj` → 对齐 \(\mathbf{Z}\)。
+
+所以问题若理解成「学生生成多长的 video」——答案是：**长度为 0；不生成 video。**
+
+---
+
+### 教师侧实际用几帧（RoboTwin 默认）
+
+配置：
+
+- `num_future_frames: 1`
+- `use_warmup_frame: true`
+
+`get_video_target` 拼给教师的序列是：
+
+```text
+[warmup_current, current, future]   → 共 3 帧
+```
+
+若关掉 warmup，则是：
+
+```text
+[current, future]   → 共 2 帧
+```
+
+未来帧时间点由数据管线决定：相对当前约 **`(chunk_size - 1) / fps`** 秒（`get_video_delta_timestamps`：`offsets = [0, (chunk_size-1)/fps]`）。默认 `chunk_size=50`，即未来帧大致对应 **action chunk 末端** 那一帧，而不是一段长视频。
+
+论文里 DINO-Video **预训练**用 16 帧；那是教师自己的预训练，**不是** VLA 学生训练时的输入长度。
+
+---
+
+### 对照
+
+| 角色 | 训练时「视频」相关行为 |
+|------|------------------------|
+| **学生（VLA）** | 不生成视频；对齐当前/未来 **特征**；动作 chunk 默认 50 步 |
+| **视频教师** | 看短 clip：默认 **3 帧**（含 warmup）或 2 帧 |
+| **动作 horizon \(T\)** | 与 chunk 对齐；未来 query 对应 chunk 末端附近的未来观测 |
+
+**一句话：学生不生成 video；默认只蒸馏「当前 + 约 1 个未来帧」对应的教师特征，教师输入约 2–3 帧短序列。**
