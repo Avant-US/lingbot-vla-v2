@@ -1,0 +1,28 @@
+data:
+  datasets_type: vla
+  data_name: robotwin
+  train_path: /mnt/r/DATA/RoboTwin-Clean/stack_bowls_three/
+  robot_config_root: ./configs/robot_configs
+  joints:
+    - arm.position: 14
+    - end.position: 14
+    - effector.position: 2
+  cameras:
+    - camera_top
+    - camera_wrist_left
+    - camera_wrist_right
+  norm_type:
+    - arm.position: bounds_99_woclip
+    - end.position: bounds_99_woclip
+    - effector.position: bounds_99_woclip
+  num_workers: 1
+  use_future_image: false
+
+train:
+  output_dir: /tmp/norm_compute_dummy
+  action_dim: 55
+  max_action_dim: 55
+  max_state_dim: 55
+  micro_batch_size: 1
+  global_batch_size: 1
+  max_steps: 1
