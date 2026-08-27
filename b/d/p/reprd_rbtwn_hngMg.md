@@ -16,7 +16,7 @@
 |------|------|
 | 基础权重 | `robbyant/lingbot-vla-v2-6b`（HF snapshot `11c703bf`，约 27 GB） |
 | 任务 | RoboTwin 2.0 `hanging_mug`，Aloha-AgileX，clean 50 条 |
-| 数据 | `/tmp/Dta/RoboTwin-Clean/hanging_mug/`（LeRobot **v2.1**，50 ep / 16889 frames / 15 FPS） |
+| 数据 | `/tmp/Dta/RoboTwin-Clean/hanging_mug/`（已转为 LeRobot **v3.0**；v2.1 备份在 `hanging_mug_old/`。50 ep / 16889 frames / 15 FPS） |
 | 代码 | `/tmp/SRC/lingbot-vla-v2` |
 | 虚拟环境 | `/tmp/itnvla15rbt20/`（Python **3.11.9**，与官方 3.12 不一致，见 §6） |
 | `HF_HOME` | `/tmp/itnvla15rbt20/var/hf_home/` |
@@ -38,7 +38,7 @@
 | MoGe | `.../ckpts/moge-2-vitb-normal/moge2-vitb-normal.pt` → `model.pt` |
 | 缓存本体 | `$HF_HOME/models--robbyant--lingbot-vla-v2-6b/`（27G）、`models--Qwen--Qwen3-VL-4B-Instruct/`（8.3G）、`models--Ruicheng--moge-2-vitb-normal/`（400M） |
 
-`train.sh` 会设置 `HF_HUB_OFFLINE=1`，因此 **必须走本地路径**，不能在训练时再访问 Hub。
+`train.sh` 会设置 `HF_HUB_OFFLINE=1`，因此 **必须走本地路径**，不能在训练时再访问 Hub。本 venv 没有 `bin/torchrun`（torch 以 site-packages 安装），已补 shim：`/tmp/itnvla15rbt20/bin/torchrun` → `python -m torch.distributed.run`。
 
 ---
 
@@ -384,19 +384,21 @@ $q_{01},q_{99}$ 来自 `assets/norm_stats/robotwin.json`（50 任务全局统计
 ```bash
 source /tmp/itnvla15rbt20/bin/activate
 export HF_HOME="/tmp/itnvla15rbt20/var/hf_home/"
+# torchcodec 需要 venv 自带的较新 libstdc++ 以及 pip 包装的 NPP
+export LD_LIBRARY_PATH="/tmp/itnvla15rbt20/lib:/tmp/itnvla15rbt20/lib/python3.11/site-packages/nvidia/npp/lib:${LD_LIBRARY_PATH:-}"
 ```
 
 | 项 | 官方 `tools/create_train_env.sh` | 本 venv 实测 | 风险 |
 |----|----------------------------------|--------------|------|
 | Python | 3.12 | **3.11.9** | ABI / wheel |
 | torch | 2.8.0 | **2.10.0+cu128** | compile / FSDP 行为可能变 |
-| transformers | 4.57.3 | **5.2.0** | Qwen3-VL 加载约定 |
-| numpy | 1.26.4 | **2.2.6** | MoGe 不喜欢 2.x |
-| lerobot | 0.4.2（v3.0） | **无法 import** | 数据加载 |
-| muon / tensorboard / qwen_vl_utils / peft / timm / moge / mdm | 需要 | **缺失** | 训练直接起不来 |
+| transformers | 4.57.3 | 已从 5.2.0 **钉回 4.57.3** | Qwen3-VL / `AutoModelForVision2Seq` |
+| numpy | 1.26.4 | 已钉回 **1.26.4**（原 2.2.6） | MoGe 不喜欢 2.x |
+| lerobot | 0.4.2（v3.0） | **0.4.2**（`--no-deps` 安装） | 数据加载 |
+| muon / tensorboard / qwen_vl_utils / peft / timm / moge / mdm | 需要 | **已补齐** | 训练依赖 |
 | flash_attn | 2.8.3 | 2.8.3 | OK |
 | lingbotvla | editable | 可从仓库 import `0.0.1` | OK |
-| torchcodec | 0.6.0 | 装了但缺 `libnppicc.so.12` | 视频解码可能失败 |
+| torchcodec | 0.6.0 | 装了；需 `LD_LIBRARY_PATH` 才能加载 `libnppicc.so.12` + 新 `libstdc++` | 视频解码 |
 
 **结论**：该 venv 更像 InternVLA 实验环境，**不能直接 `bash train.sh`**。本实施走 **路线 B**：在 `/tmp/itnvla15rbt20` 上补依赖（不降 torch；transformers 5.2 与官方 4.57.3 不一致，若加载失败再钉版本）。
 
@@ -410,11 +412,20 @@ python -m pip install numpy==1.26.4
 python -m pip install --no-deps "lerobot @ https://github.com/huggingface/lerobot/archive/refs/tags/v0.4.2.tar.gz"
 python -m pip install -e /tmp/SRC/lingbot-vla-v2 --no-deps
 python -m pip install -e /tmp/SRC/lingbot-vla-v2/lingbotvla/models/vla/vision_models/lingbot-depth --no-deps
-python -m pip install -e /tmp/SRC/lingbot-vla-v2/lingbotvla/models/vla/vision_models/MoGe
+# MoGe 全量 deps 会拉 gradio + opencv-python 5.x 并把 numpy 升到 2.4；训练路径只要 moge + utils3d
+python -m pip install -e /tmp/SRC/lingbot-vla-v2/lingbotvla/models/vla/vision_models/MoGe --no-deps
+python -m pip install --no-deps "utils3d @ git+https://github.com/EasternJournalist/utils3d.git@3fab839f0be9931dac7c8488eb0e1600c236e183"
+python -m pip install numpy==1.26.4
 # muon 随仓库 lingbotvla.optim.muon，一般不必独立包
 ```
 
-若 `LeRobotDataset` 因 torchcodec/ffmpeg 失败，优先修 CUDA npp 库或改用官方 3.12 环境。
+`torchcodec` 已安装，但默认 `LD_LIBRARY_PATH` 找不到 pip 包装的 `libnppicc.so.12`；补上 NPP 之后还会撞系统 `libstdc++` 缺少 `CXXABI_1.3.15`（venv 里的 ffmpeg/openvino 需要更新的 ABI）。训练前必须：
+
+```bash
+export LD_LIBRARY_PATH="/tmp/itnvla15rbt20/lib:/tmp/itnvla15rbt20/lib/python3.11/site-packages/nvidia/npp/lib:${LD_LIBRARY_PATH:-}"
+```
+
+备选：把 `VLADataset` 的 `video_backend` 改成 `pyav`（本机 `torchvision`+pyav 已能解 AV1）。
 
 磁盘：venv+权重在 `/tmp/itnvla15rbt20`（约 93G）；overlay 迁出后约 232G 可用。DCP 写 `/tmp/Ckp/lingbot-vla-v2-ft-hanging_mug/`。
 
@@ -507,19 +518,16 @@ nvidia-smi -L
 
 ### Step 1 — 数据：v2.1 → v3.0
 
-当前 `meta/info.json` 的 `codebase_version` 是 **v2.1**。lerobot 0.4.2 会抛 `BackwardCompatibilityError`（仓库 README 写“支持 v2.1/v3.0”，但 0.4.2 实际拒绝 major≠3）。与 stack_bowls 相同：
+当前数据已转为 **v3.0**（转换器会把原目录挪到 `hanging_mug_old/`，不必再 `cp -a` 一份）。若从干净 v2.1 重来：
 
 ```bash
-# 备份
-cp -a /tmp/Dta/RoboTwin-Clean/hanging_mug /tmp/Dta/RoboTwin-Clean/hanging_mug_v21_backup
-
 python -m lerobot.datasets.v30.convert_dataset_v21_to_v30 \
   --repo-id=hanging_mug \
   --root=/tmp/Dta/RoboTwin-Clean \
   --push-to-hub=false
 ```
 
-转换后训练路径仍是 `/tmp/Dta/RoboTwin-Clean/hanging_mug/`。若转换工具把数据写到 `$HF_HOME/lerobot/`，再把 YAML `train_path` 改过去，或把转换结果移回原目录。
+lerobot 0.4.2 会拒 v2.1（`BackwardCompatibilityError`）。转换后训练路径仍是 `/tmp/Dta/RoboTwin-Clean/hanging_mug/`。
 
 ### Step 2 — 归一化（可选）
 
@@ -547,13 +555,12 @@ CUDA_VISIBLE_DEVICES=0 bash train.sh scripts/compute_norm_stats.py \
 ```bash
 mkdir -p /tmp/Ckp/lingbot-vla-v2-ft-hanging_mug
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-
-setsid bash -c 'bash train.sh tasks/vla/train_lingbotvla.py \
-  ./configs/vla/robotwin/hanging_mug_ft.yaml \
-  --data.norm_stats_file assets/norm_stats/robotwin.json \
-  --train.use_compile false \
-  > /tmp/Ckp/lingbot-vla-v2-ft-hanging_mug/train_stdout.log 2>&1' </dev/null &
+# 推荐：用已写好环境变量的启动脚本（含 LD_LIBRARY_PATH / CC / TORCHINDUCTOR_CACHE_DIR）
+nohup bash /tmp/Ckp/lingbot-vla-v2-ft-hanging_mug/launch_train.sh \
+  > /tmp/Ckp/lingbot-vla-v2-ft-hanging_mug/train_stdout.log 2>&1 &
 ```
+
+`launch_train.sh` 会 `source` venv 并设置：`HF_HOME`、`LD_LIBRARY_PATH`（torchcodec）、`CC`/`CXX`（flex attention 的 Inductor）、`TORCHINDUCTOR_CACHE_DIR`、`use_compile false`。镜像需有 `gcc`/`g++`（本机已 `apt-get install`）。
 
 `train.sh` 用 `torchrun --nproc-per-node $NPROC_PER_NODE`，并 `tee log.txt` 到仓库根目录。
 

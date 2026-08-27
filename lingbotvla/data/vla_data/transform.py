@@ -69,6 +69,12 @@ class Normalizer:
             if stat.shape[0] != value.shape[0]:
                 stat = stat[: value.shape[0]]
 
+        # torch 2.10 DataLoader workers: `tensor - ndarray` can raise
+        # RuntimeError("stoi") (numpy interop after CUDA init in parent).
+        # Align stats to the value tensor on CPU/GPU before arithmetic.
+        if isinstance(value, torch.Tensor):
+            stat = torch.as_tensor(np.asarray(stat), dtype=value.dtype, device=value.device)
+
         return stat
 
     def normalize(self, data: Dict[str, np.ndarray]) -> Dict[str, torch.Tensor]:
