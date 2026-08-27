@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="430" viewBox="0 0 980 430">
+<rect width="100%" height="100%" fill="#FAFAFA"/>
+<text x="490" y="32" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="18" font-weight="700" fill="#222">hanging_mug fine-tune: what is updated vs frozen</text>
+<text x="490" y="54" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="12" fill="#666">post_training=true, freeze_vision_encoder=false, train_expert_only=false</text>
+<rect x="40" y="80" width="280" height="70" rx="8" fill="#C8E6C9" stroke="#333" stroke-width="1.4"/>
+<text x="180.0" y="102.0" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="13" font-weight="700" fill="#222">Qwen3 ViT</text>
+<text x="180.0" y="122.0" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="11" fill="#444">trainable (lr = 1e-4)</text>
+<rect x="350" y="80" width="280" height="70" rx="8" fill="#C8E6C9" stroke="#333" stroke-width="1.4"/>
+<text x="490.0" y="102.0" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="13" font-weight="700" fill="#222">Qwen3-VL LM</text>
+<text x="490.0" y="122.0" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="11" fill="#444">trainable, FSDP2 sharded</text>
+<rect x="660" y="80" width="280" height="70" rx="8" fill="#C8E6C9" stroke="#333" stroke-width="1.4"/>
+<text x="800.0" y="102.0" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="13" font-weight="700" fill="#222">Query tokens + align heads</text>
+<text x="800.0" y="122.0" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="11" fill="#444">depth/video distillation</text>
+<rect x="40" y="180" width="430" height="80" rx="8" fill="#A5D6A7" stroke="#333" stroke-width="1.4"/>
+<text x="255.0" y="202.0" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="13" font-weight="700" fill="#222">Action Expert 36-layer + Sparse MoE</text>
+<text x="255.0" y="222.0" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="11" fill="#444">trainable; routed-expert LR = 2.83e-4</text>
+<rect x="500" y="180" width="210" height="80" rx="8" fill="#C8E6C9" stroke="#333" stroke-width="1.4"/>
+<text x="605.0" y="202.0" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="13" font-weight="700" fill="#222">state/action proj</text>
+<text x="605.0" y="222.0" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="11" fill="#444">AdaRMSNorm time cond.</text>
+<rect x="740" y="180" width="200" height="80" rx="8" fill="#C8E6C9" stroke="#333" stroke-width="1.4"/>
+<text x="840.0" y="202.0" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="13" font-weight="700" fill="#222">Muon + AdamW</text>
+<text x="840.0" y="222.0" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="11" fill="#444">2D/3D vs 1D params</text>
+<rect x="40" y="290" width="280" height="80" rx="8" fill="#FFCDD2" stroke="#333" stroke-width="1.4"/>
+<text x="180.0" y="312.0" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="13" font-weight="700" fill="#222">MoGe (frozen)</text>
+<text x="180.0" y="332.0" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="11" fill="#444">depth teacher, no_grad</text>
+<rect x="350" y="290" width="280" height="80" rx="8" fill="#FFCDD2" stroke="#333" stroke-width="1.4"/>
+<text x="490.0" y="312.0" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="13" font-weight="700" fill="#222">LingBot-Depth / MoRGBD</text>
+<text x="490.0" y="332.0" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="11" fill="#444">frozen teacher</text>
+<rect x="660" y="290" width="280" height="80" rx="8" fill="#FFCDD2" stroke="#333" stroke-width="1.4"/>
+<text x="800.0" y="312.0" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="13" font-weight="700" fill="#222">DINO-Video</text>
+<text x="800.0" y="332.0" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="11" fill="#444">frozen teacher</text>
+<text x="40" y="410" font-family="DejaVu Sans,Arial,sans-serif" font-size="12" fill="#333">Green = student weights loaded from robbyant/lingbot-vla-v2-6b and updated. Red = teachers, forward-only.</text>
+</svg>
