@@ -1,0 +1,53 @@
+# Pipeline config: sequential LeRobot v3 convert + single-task FT for RoboTwin 2.0.
+# Override any field from the CLI of run_each_robotwin.py. Paths may use ~.
+
+paths:
+  # Empty repo_root => auto-detect from this file (../../..).
+  repo_root: ""
+  venv: /tmp/itnvla15rbt20
+  hf_home: /tmp/itnvla15rbt20/var/hf_home
+  data_root: ~/Dta/RoboTwin-Clean
+  ckpt_root: ~/Ckp/lbRbt
+  robot_config_root: ./configs/robot_configs
+  norm_stats_file: assets/norm_stats/robotwin.json
+  train_entry: tasks/vla/train_lingbotvla.py
+  train_sh: train.sh
+  ft_template: b/s/rbt/templates/single_task_ft.yaml
+
+model:
+  model_path: "{hf_home}/ckpts/lingbot-vla-v2-6b/hf_ckpt"
+  tokenizer_path: "{hf_home}/ckpts/Qwen3-VL-4B-Instruct"
+  moge_path: "{hf_home}/ckpts/moge-2-vitb-normal/moge2-vitb-normal.pt"
+  morgbd_path: "{hf_home}/ckpts/lingbot-vla-v2-6b/depth/model.pt"
+  video_ckpt_path: "{hf_home}/ckpts/lingbot-vla-v2-6b/dino_video/teacher_step_10000.pth"
+  video_config_path: "{hf_home}/ckpts/lingbot-vla-v2-6b/dino_video/config.yaml"
+
+# First batch. Change this list to run other RoboTwin 2.0 clean tasks.
+tasks:
+  - scan_object
+  - place_bread_skillet
+  - pick_dual_bottles
+
+train:
+  num_epochs: 76
+  global_batch_size: 128
+  micro_batch_size: 8
+  # 0 => derive from CUDA_VISIBLE_DEVICES / nvidia-smi
+  n_gpus: 0
+  save_every_epoch_fraction: 0.25
+  use_compile: false
+  use_wandb: false
+  wandb_project: lingbotvla-robotwin-ft
+  num_workers: 8
+  enable_gradient_checkpointing: true
+
+convert:
+  skip_if_v3: true
+  push_to_hub: false
+
+runtime:
+  continue_on_error: false
+  cuda_visible_devices: "0,1,2,3,4,5,6,7"
+  master_port: 62500
+  cc: /usr/bin/gcc
+  cxx: /usr/bin/g++
