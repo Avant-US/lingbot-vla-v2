@@ -1,6 +1,7 @@
 #!/bin/bash
 
 set -x
+set -o pipefail
 
 export TOKENIZERS_PARALLELISM=false
 export HF_HUB_OFFLINE=1 

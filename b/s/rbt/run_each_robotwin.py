@@ -314,6 +314,12 @@ def launch_train(
         str(paths["norm_stats_file"]),
         "--train.use_compile",
         bool_yaml(bool(cfg["train"].get("use_compile", False))),
+        # Rank-0 HF export takes >10 min and exceeds the 600s NCCL timeout even
+        # if other ranks wait at dist.barrier(). DCP is enough to resume.
+        "--train.save_hf_weights",
+        "false",
+        "--train.async_save_hf_weights",
+        "false",
     ]
     logger.info("train cmd (cwd=%s): %s", repo, " ".join(cmd))
     logger.info("stdout log: %s", stdout_log)
@@ -328,7 +334,18 @@ def launch_train(
     if tee_src.is_file():
         shutil.copy2(tee_src, output_dir / f"train_sh_tee_{stamp}.log")
     logger.info("train exit_code=%s", proc.returncode)
-    return proc.returncode
+    rc = proc.returncode
+    if rc == 0:
+        # train.sh historically piped torchrun into tee without pipefail, so a
+        # crashed job could still report 0. Treat known failure markers as error.
+        try:
+            tail = stdout_log.read_text(encoding="utf-8", errors="replace")[-250000:]
+        except OSError:
+            tail = ""
+        if "ChildFailedError" in tail or "DistBackendError" in tail:
+            logger.error("train stdout shows distributed failure despite exit_code=0")
+            return 1
+    return rc
 
 
 def parse_cli() -> argparse.Namespace:

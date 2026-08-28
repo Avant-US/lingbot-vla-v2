@@ -604,21 +604,23 @@ def main():
         epoch: int | None = None,
         epoch_step: int | None = None,
     ) -> None:
-        if args.train.global_rank != 0:
-            return
-        if not args.train.save_hf_weights or checkpoint_path is None:
-            return
-        hf_saver.submit(
-            global_step=step,
-            save_checkpoint_path=checkpoint_path,
-            output_dir=args.train.output_dir,
-            ckpt_manager=args.train.ckpt_manager,
-            save_ema=checkpoint_state.get("ema") is not None,
-            enable_fp32=args.train.enable_fp32,
-            model_assets=model_assets,
-            epoch=epoch,
-            epoch_step=epoch_step,
-        )
+        # Rank 0 converts DCP -> HF. Other ranks must wait, otherwise they
+        # enter the next FSDP all-gather and NCCL times out (600s) while rank 0
+        # is still serializing weights.
+        if args.train.global_rank == 0 and args.train.save_hf_weights and checkpoint_path is not None:
+            hf_saver.submit(
+                global_step=step,
+                save_checkpoint_path=checkpoint_path,
+                output_dir=args.train.output_dir,
+                ckpt_manager=args.train.ckpt_manager,
+                save_ema=checkpoint_state.get("ema") is not None,
+                enable_fp32=args.train.enable_fp32,
+                model_assets=model_assets,
+                epoch=epoch,
+                epoch_step=epoch_step,
+            )
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
 
     environ_meter = helper.EnvironMeter(
         config=model_config,
